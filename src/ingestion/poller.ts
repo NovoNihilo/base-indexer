@@ -11,7 +11,6 @@ import {
   getLatestBlockNumber,
 } from './fetcher.js';
 import { computeBlockMetrics } from '../parsing/metrics.js';
-import type { Transaction } from 'viem';
 
 async function handleReorg(currentBlock: bigint): Promise<bigint> {
   const prevRow = stmts.getBlockByNumber.get(Number(currentBlock - 1n)) as
@@ -43,7 +42,10 @@ async function handleReorg(currentBlock: bigint): Promise<bigint> {
 
 async function processBlock(blockNumber: bigint) {
   const block = await fetchBlockWithTxs(blockNumber);
-  const txs = (block.transactions || []) as Transaction[];
+  
+  const txs = block.transactions.filter(
+    (tx): tx is Exclude<typeof tx, string> => typeof tx !== 'string'
+  );
 
   stmts.insertBlock.run(
     Number(block.number),
@@ -55,7 +57,10 @@ async function processBlock(blockNumber: bigint) {
     block.baseFeePerGas?.toString() ?? null
   );
 
+  const txHashes: string[] = [];
+
   for (const tx of txs) {
+    txHashes.push(tx.hash);
     stmts.insertTx.run(
       tx.hash,
       Number(block.number),
@@ -69,7 +74,7 @@ async function processBlock(blockNumber: bigint) {
     );
   }
 
-  const receipts = await fetchReceipts(txs.map((tx) => tx.hash));
+  const receipts = await fetchReceipts(txHashes);
   const allLogs: any[] = [];
 
   for (const receipt of receipts) {
@@ -134,7 +139,7 @@ function sleep(ms: number) {
 }
 
 export async function startPoller() {
-  let lastProcessed = getLastProcessedBlock();
+  let lastProcessed: bigint | null = getLastProcessedBlock();
 
   if (lastProcessed === null) {
     const latest = await getLatestBlockNumber();
@@ -147,7 +152,7 @@ export async function startPoller() {
   while (true) {
     try {
       const latestHead = await getLatestBlockNumber();
-      const nextBlock = lastProcessed + 1n;
+      const nextBlock: bigint = lastProcessed + 1n;
 
       if (nextBlock > latestHead) {
         await sleep(cfg.POLL_INTERVAL_MS);
