@@ -8,7 +8,19 @@ export async function fetchBlockWithTxs(blockNumber: bigint) {
   return client.getBlock({ blockNumber, includeTransactions: true });
 }
 
-export async function fetchReceipts(txHashes: string[]) {
+export async function fetchBlockReceipts(blockNumber: bigint): Promise<any[] | null> {
+  try {
+    const receipts = await client.request({
+      method: 'eth_getBlockReceipts' as any,
+      params: [`0x${blockNumber.toString(16)}`],
+    });
+    return receipts as any[];
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchReceiptsIndividually(txHashes: string[]) {
   const tasks = txHashes.map((hash) =>
     limit(() => client.getTransactionReceipt({ hash: hash as `0x${string}` }))
   );
