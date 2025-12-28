@@ -22,6 +22,13 @@ function formatPct(value: number, total: number): string {
   return pct.toFixed(1) + '%';
 }
 
+function formatChange(current: number, previous: number): string {
+  if (previous === 0) return 'N/A';
+  const change = ((current - previous) / previous) * 100;
+  const sign = change >= 0 ? '+' : '';
+  return `${sign}${change.toFixed(1)}%`;
+}
+
 function getUTCHour(timestamp: number): number {
   const date = new Date(timestamp * 1000);
   return date.getUTCHours();
@@ -32,20 +39,63 @@ function getLabel(addr: string): string | null {
   return row?.name || null;
 }
 
-function formatAddress(addr: string, maxLen: number = 42): string {
-  const label = getLabel(addr);
-  if (label) {
-    return `${label} (${addr})`;
-  }
-  return addr;
-}
-
 function formatAddressShort(addr: string): string {
   const label = getLabel(addr);
   if (label) {
     return label;
   }
   return addr;
+}
+
+function getDayStats(dateStr: string) {
+  const startOfDay = new Date(dateStr + 'T00:00:00Z').getTime() / 1000;
+  const endOfDay = new Date(dateStr + 'T23:59:59Z').getTime() / 1000;
+
+  const blockCount = db
+    .prepare(`SELECT COUNT(*) as count FROM blocks WHERE timestamp >= ? AND timestamp <= ? AND reorged = 0`)
+    .get(startOfDay, endOfDay) as { count: number };
+
+  if (blockCount.count === 0) return null;
+
+  const blocks = db
+    .prepare(`SELECT number, timestamp FROM blocks WHERE timestamp >= ? AND timestamp <= ? AND reorged = 0 ORDER BY number ASC`)
+    .all(startOfDay, endOfDay) as BlockRow[];
+
+  const firstBlock = blocks[0];
+  const lastBlock = blocks[blocks.length - 1];
+
+  const metrics = db
+    .prepare(`SELECT SUM(txCount) as txCount, SUM(logCount) as logCount FROM block_metrics WHERE blockNumber >= ? AND blockNumber <= ?`)
+    .get(firstBlock.number, lastBlock.number) as { txCount: number; logCount: number };
+
+  const dexSwapCount = db
+    .prepare(`SELECT COUNT(*) as count FROM dex_swaps WHERE blockNumber >= ? AND blockNumber <= ?`)
+    .get(firstBlock.number, lastBlock.number) as { count: number };
+
+  const tokenTransferCount = db
+    .prepare(`SELECT COUNT(*) as count FROM token_transfers WHERE blockNumber >= ? AND blockNumber <= ?`)
+    .get(firstBlock.number, lastBlock.number) as { count: number };
+
+  const contractDeployCount = db
+    .prepare(`SELECT COUNT(*) as count FROM contract_deployments WHERE blockNumber >= ? AND blockNumber <= ?`)
+    .get(firstBlock.number, lastBlock.number) as { count: number };
+
+  // Daily active addresses (unique fromAddr)
+  const activeAddresses = db
+    .prepare(`SELECT COUNT(DISTINCT fromAddr) as count FROM transactions WHERE blockNumber >= ? AND blockNumber <= ?`)
+    .get(firstBlock.number, lastBlock.number) as { count: number };
+
+  return {
+    blocks: blocks.length,
+    txCount: metrics.txCount,
+    logCount: metrics.logCount,
+    swaps: dexSwapCount.count,
+    transfers: tokenTransferCount.count,
+    deploys: contractDeployCount.count,
+    activeAddresses: activeAddresses.count,
+    firstBlock: firstBlock.number,
+    lastBlock: lastBlock.number,
+  };
 }
 
 function printDailyStats(targetDate?: string) {
@@ -60,6 +110,11 @@ function printDailyStats(targetDate?: string) {
     yesterday.setUTCDate(yesterday.getUTCDate() - 1);
     dateToAnalyze = yesterday.toISOString().split('T')[0];
   }
+
+  // Get previous day for comparison
+  const prevDate = new Date(dateToAnalyze + 'T00:00:00Z');
+  prevDate.setUTCDate(prevDate.getUTCDate() - 1);
+  const prevDateStr = prevDate.toISOString().split('T')[0];
 
   const startOfDay = new Date(dateToAnalyze + 'T00:00:00Z').getTime() / 1000;
   const endOfDay = new Date(dateToAnalyze + 'T23:59:59Z').getTime() / 1000;
@@ -109,6 +164,14 @@ function printDailyStats(targetDate?: string) {
       WHERE blockNumber >= ? AND blockNumber <= ?
     `)
     .get(firstBlock.number, lastBlock.number) as { txCount: number; logCount: number; totalGas: number };
+
+  // Daily active addresses
+  const activeAddresses = db
+    .prepare(`SELECT COUNT(DISTINCT fromAddr) as count FROM transactions WHERE blockNumber >= ? AND blockNumber <= ?`)
+    .get(firstBlock.number, lastBlock.number) as { count: number };
+
+  // Get previous day stats for comparison
+  const prevStats = getDayStats(prevDateStr);
 
   // Get ALL events for breakdown
   const events = db
@@ -231,7 +294,13 @@ function printDailyStats(targetDate?: string) {
   console.log(`  Total Blocks:        ${formatNumber(blocks.length)}`);
   console.log(`  Block Range:         ${formatNumber(firstBlock.number)} → ${formatNumber(lastBlock.number)}`);
   console.log(`  Avg Block Time:      ${avgBlockTime.toFixed(2)}s`);
-  console.log(`  Total Transactions:  ${formatNumber(metrics.txCount)}`);
+  
+  const txChange = prevStats ? ` (${formatChange(metrics.txCount, prevStats.txCount)})` : '';
+  console.log(`  Total Transactions:  ${formatNumber(metrics.txCount)}${txChange}`);
+  
+  const addrChange = prevStats ? ` (${formatChange(activeAddresses.count, prevStats.activeAddresses)})` : '';
+  console.log(`  Active Addresses:    ${formatNumber(activeAddresses.count)}${addrChange}`);
+  
   console.log(`  Total Logs:          ${formatNumber(metrics.logCount)}`);
   console.log(`  Total Gas Used:      ${formatNumber(metrics.totalGas)}`);
   console.log(`  Avg Tx/Block:        ${(metrics.txCount / blocks.length).toFixed(1)}`);
@@ -253,7 +322,8 @@ function printDailyStats(targetDate?: string) {
 
   console.log('\n💱 DEX ACTIVITY');
   console.log('─'.repeat(100));
-  console.log(`  Total Swaps:         ${formatNumber(dexSwapCount.count)}`);
+  const swapChange = prevStats ? ` (${formatChange(dexSwapCount.count, prevStats.swaps)})` : '';
+  console.log(`  Total Swaps:         ${formatNumber(dexSwapCount.count)}${swapChange}`);
   for (const dex of dexBreakdown) {
     const pct = formatPct(dex.count, dexSwapCount.count);
     console.log(`    ${dex.dexName.padEnd(22)} ${formatNumber(dex.count).padStart(12)}  (${pct.padStart(8)})`);
@@ -310,7 +380,37 @@ function printDailyStats(targetDate?: string) {
     console.log(`  ${h.toString().padStart(2)}:00 │${bar}│ ${formatNumber(data.txCount).padStart(10)}`);
   }
 
+  // Twitter-ready output
   console.log('\n');
+  console.log('═'.repeat(100));
+  console.log('📱 TWITTER-READY FORMAT (copy below):');
+  console.log('═'.repeat(100));
+  console.log('');
+  
+  const tweetTxChange = prevStats ? ` (${formatChange(metrics.txCount, prevStats.txCount)} vs yesterday)` : '';
+  const tweetAddrChange = prevStats ? ` (${formatChange(activeAddresses.count, prevStats.activeAddresses)})` : '';
+  
+  console.log(`📊 Base Network Daily Stats - ${dateToAnalyze}`);
+  console.log('');
+  console.log(`🔢 ${formatNumber(metrics.txCount)} transactions${tweetTxChange}`);
+  console.log(`👥 ${formatNumber(activeAddresses.count)} active addresses${tweetAddrChange}`);
+  console.log(`💱 ${formatNumber(dexSwapCount.count)} DEX swaps`);
+  console.log(`🏗️ ${formatNumber(contractDeployCount.count)} new contracts`);
+  console.log('');
+  console.log('Top DEXs:');
+  for (const dex of dexBreakdown.slice(0, 3)) {
+    const pct = formatPct(dex.count, dexSwapCount.count);
+    console.log(`• ${dex.dexName}: ${formatNumber(dex.count)} (${pct})`);
+  }
+  console.log('');
+  console.log('🔥 Top tokens by transfers:');
+  for (const token of topTokens.slice(0, 5)) {
+    const label = getLabel(token.tokenAddress) || token.tokenAddress.slice(0, 10) + '...';
+    console.log(`• ${label}: ${formatNumber(token.count)}`);
+  }
+  console.log('');
+  console.log(`⏰ Peak hour: ${peakHour.toString().padStart(2, '0')}:00 UTC`);
+  console.log('');
 }
 
 // Parse command line args
