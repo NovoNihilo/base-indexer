@@ -143,6 +143,14 @@ export function createTables(db: Database.Database) {
       protocol TEXT
     );
 
+    -- Pool to DEX cache (for accurate swap attribution)
+    CREATE TABLE IF NOT EXISTS pool_dex_cache (
+      poolAddress TEXT PRIMARY KEY,
+      factoryAddress TEXT,
+      dexName TEXT NOT NULL,
+      createdAt INTEGER DEFAULT (unixepoch())
+    );
+
     -- Daily aggregates (for fast stats queries)
     CREATE TABLE IF NOT EXISTS daily_stats (
       date TEXT PRIMARY KEY,
@@ -180,5 +188,6 @@ export function createTables(db: Database.Database) {
     CREATE INDEX IF NOT EXISTS idx_dex_swaps_block ON dex_swaps(blockNumber);
     CREATE INDEX IF NOT EXISTS idx_dex_swaps_pool ON dex_swaps(poolAddress);
     CREATE INDEX IF NOT EXISTS idx_blocks_timestamp ON blocks(timestamp);
+    CREATE INDEX IF NOT EXISTS idx_pool_dex_factory ON pool_dex_cache(factoryAddress);
   `);
 }
