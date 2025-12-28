@@ -122,6 +122,13 @@ export function seedContractLabels() {
     ['0x3c8cd0db9a01efa063a7760267b822a129bc7dca', 'BENJI', 'token', 'Benji'],
     ['0x9ff8aa79df666632e00559018837f1e0e2f1f30b', 'CHOMP', 'token', 'Chomp'],
     ['0x8544fe9d190fd7ec52860abbf45088e81ee24a8c', 'SPEC', 'token', 'Spectral'],
+    
+    // NEW: Recently identified tokens from top transfers
+    ['0x514b6572c502eb7eb77c3b0f97fff1e48a3c6cfd', 'bPOL', 'token', 'Bridged'],
+    ['0x1111111111166b7fe7bd91427724b487980afc69', 'ZORA', 'token', 'Zora'],
+    ['0x696f9436b67233384889472cd7cd58a6fb5df4f1', 'AVNT', 'token', 'Avantis'],
+    ['0x311935cd80b76769bf2ecc9d8ab7635b2139cf82', 'SOL', 'token', 'Bridged'],
+    ['0xa749de6c28262b7ffbc5de27dc845dd7ecd2b358', 'VFY', 'token', 'zkVerify'],
 
     // Uniswap
     ['0x4752ba5dbc23f44d87826276bf6fd6b1c372ad24', 'Uniswap V3 Router', 'dex', 'Uniswap'],
@@ -131,6 +138,9 @@ export function seedContractLabels() {
     ['0x03a520b32c04bf3beef7beb72e919cf822ed34f1', 'Uniswap V3 Positions', 'dex', 'Uniswap'],
     ['0x1238536071e1c677a632429e3655c799b22cda52', 'Uniswap V4 Pool Manager', 'dex', 'Uniswap'],
     
+    // NEW: Uniswap V4 Pool Manager (high activity contract)
+    ['0x498581ff718922c3f8e6a244956af099b2652b2b', 'Uniswap V4 Pool Manager', 'dex', 'Uniswap V4'],
+    
     // Aerodrome
     ['0xcf77a3ba9a5ca399b7c97c74d54e5b1beb874e43', 'Aerodrome Router', 'dex', 'Aerodrome'],
     ['0x6cb442acf35158d5eda88fe602221b67b400be3e', 'Aerodrome V2 Router', 'dex', 'Aerodrome'],
@@ -138,6 +148,9 @@ export function seedContractLabels() {
     ['0x827922686190790b37229fd06084350e74485b72', 'Aerodrome Voter', 'dex', 'Aerodrome'],
     ['0xebf418fe2512e7e6bd9b87a8f0f294acdc67e6b4', 'Aerodrome veNFT', 'dex', 'Aerodrome'],
     ['0x16613524e02ad97edfef371bc883f2f5d6c480a5', 'Slipstream Factory', 'dex', 'Aerodrome'],
+    
+    // NEW: Aerodrome Rewards Distributor (high activity contract)
+    ['0xa990c6a764b73bf43cee5bb40339c3322fb9d55f', 'Aerodrome Rewards Distributor', 'dex', 'Aerodrome'],
     
     // Base Bridge & System
     ['0x4200000000000000000000000000000000000010', 'L2 Standard Bridge', 'bridge', 'Base'],
@@ -188,7 +201,7 @@ export function seedContractLabels() {
     ['0x8250f4af4b972684f7b336503e2d6dfedeb1487a', 'RedStone Oracle', 'oracle', 'RedStone'],
     ['0x71041dddad3595f9ced3dccfbe3d1f4b0a16bb70', 'Chainlink Price Feed', 'oracle', 'Chainlink'],
     
-    // Cross-chain
+    // Cross-chain & Bridges
     ['0x3a23f943181408eac424116af7b7790c94cb97a5', 'Socket Vault', 'bridge', 'Socket'],
     ['0x1231deb6f5749ef6ce6943a275a1d3e7486f4eae', 'Li.Fi Diamond', 'bridge', 'Li.Fi'],
     ['0x0000000000001ff3684f28c67538d4d072c22734', 'Stargate Router', 'bridge', 'Stargate'],
@@ -196,6 +209,9 @@ export function seedContractLabels() {
     ['0x19330d10d9cc8751218eaf51e8885d058642e08a', 'Across Bridge', 'bridge', 'Across'],
     ['0x09aea4b2242abc8bb4bb78d537a67a245a7bec64', 'Axelar Gateway', 'bridge', 'Axelar'],
     ['0x4200000000000000000000000000000000000014', 'L2 Output Oracle', 'bridge', 'Base'],
+    
+    // NEW: Relay Router (high activity bridge contract)
+    ['0xf5042e6ffac5a625d4e7848e0b01373d8eb9e222', 'Relay Router', 'bridge', 'Relay'],
     
     // Other DEXs & AMMs
     ['0xd5e8d7f221f44e49b4d01e6b46b33abf23c56e7a', 'Curve StableSwap', 'dex', 'Curve'],
