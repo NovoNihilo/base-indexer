@@ -8,7 +8,7 @@
 
 import { db } from '../storage/db.js';
 import { client } from '../rpc.js';
-import type { Hex, Address } from 'viem';
+import type { Address } from 'viem';
 
 // ============================================================================
 // DEX FACTORY ADDRESSES (lowercase)
@@ -47,31 +47,31 @@ const FACTORY_TO_DEX: Record<string, string> = {
 // SPECIAL SINGLETON CONTRACTS (not factory-based)
 // ============================================================================
 
-// Uniswap V4 uses a singleton PoolManager - all V4 swaps emit from this address
 const UNISWAP_V4_POOL_MANAGER = '0x498581ff718922c3f8e6a244956af099b2652b2b';
 
-// Curve pools don't have a factory() function, identify by known pools or registry
 const CURVE_POOLS = new Set([
-  '0x7f90122bf0700f9e7e1f688fe926940e8839f353', // Curve 3pool
-  '0x6e53131f68a034873b6bfa15502af094ef0c5854', // Curve crvUSD/USDC
-  // Add more as discovered
+  '0x7f90122bf0700f9e7e1f688fe926940e8839f353',
+  '0x6e53131f68a034873b6bfa15502af094ef0c5854',
 ]);
 
 // ============================================================================
-// IN-MEMORY CACHE (populated from SQLite on startup)
+// IN-MEMORY CACHE
 // ============================================================================
 
 const poolCache = new Map<string, string>();
 let cacheLoaded = false;
 
-// Prepared statements (initialized lazily)
-let getPoolDexStmt: any;
-let insertPoolDexStmt: any;
+let getPoolDexStmt: ReturnType<typeof db.prepare> | null = null;
+let insertPoolDexStmt: ReturnType<typeof db.prepare> | null = null;
 
 function initStatements() {
   if (!getPoolDexStmt) {
-    getPoolDexStmt = db.prepare(`SELECT dexName FROM pool_dex_cache WHERE poolAddress = ?`);
-    insertPoolDexStmt = db.prepare(`INSERT OR REPLACE INTO pool_dex_cache (poolAddress, factoryAddress, dexName) VALUES (?, ?, ?)`);
+    try {
+      getPoolDexStmt = db.prepare(`SELECT dexName FROM pool_dex_cache WHERE poolAddress = ?`);
+      insertPoolDexStmt = db.prepare(`INSERT OR REPLACE INTO pool_dex_cache (poolAddress, factoryAddress, dexName) VALUES (?, ?, ?)`);
+    } catch (e) {
+      console.error('Failed to init pool cache statements:', e);
+    }
   }
 }
 
@@ -86,7 +86,7 @@ function loadCache() {
     cacheLoaded = true;
     console.log(`📦 Loaded ${poolCache.size} pools into DEX cache`);
   } catch (e) {
-    // Table might not exist yet
+    console.error('Failed to load pool cache:', e);
     cacheLoaded = true;
   }
 }
@@ -113,7 +113,8 @@ async function queryPoolFactory(poolAddress: string): Promise<string | null> {
       functionName: 'factory',
     });
     return (factory as string).toLowerCase();
-  } catch {
+  } catch (e) {
+    // Pool doesn't have factory() function
     return null;
   }
 }
@@ -122,20 +123,6 @@ async function queryPoolFactory(poolAddress: string): Promise<string | null> {
 // MAIN API
 // ============================================================================
 
-/**
- * Get the DEX name for a pool address.
- * 
- * Resolution order:
- * 1. Check if it's a known singleton (Uniswap V4 PoolManager)
- * 2. Check if it's a known Curve pool
- * 3. Check in-memory cache
- * 4. Check SQLite cache
- * 5. Query the pool's factory() on-chain and cache result
- * 
- * @param poolAddress - The pool contract address
- * @param topic0 - The event signature (used for fallback classification)
- * @returns DEX name or 'Unknown DEX' if not identifiable
- */
 export async function getDexForPool(poolAddress: string, topic0?: string): Promise<string> {
   const addr = poolAddress.toLowerCase();
   
@@ -158,38 +145,66 @@ export async function getDexForPool(poolAddress: string, topic0?: string): Promi
   
   // 4. SQLite cache
   initStatements();
-  const row = getPoolDexStmt.get(addr) as { dexName: string } | undefined;
-  if (row) {
-    poolCache.set(addr, row.dexName);
-    return row.dexName;
+  if (getPoolDexStmt) {
+    try {
+      const row = getPoolDexStmt.get(addr) as { dexName: string } | undefined;
+      if (row) {
+        poolCache.set(addr, row.dexName);
+        return row.dexName;
+      }
+    } catch (e) {
+      // Ignore
+    }
   }
   
   // 5. Query factory on-chain
+  console.log(`🔍 Querying factory for pool ${addr.slice(0, 10)}...`);
   const factoryAddr = await queryPoolFactory(addr);
   
   if (factoryAddr) {
+    console.log(`   Factory: ${factoryAddr}`);
     const dexName = FACTORY_TO_DEX[factoryAddr];
     if (dexName) {
+      console.log(`   ✓ Identified as ${dexName}`);
       // Cache the result
       poolCache.set(addr, dexName);
-      insertPoolDexStmt.run(addr, factoryAddr, dexName);
+      if (insertPoolDexStmt) {
+        try {
+          insertPoolDexStmt.run(addr, factoryAddr, dexName);
+        } catch (e) {
+          console.error('Failed to cache pool:', e);
+        }
+      }
       return dexName;
     }
     
-    // Unknown factory - cache as "Unknown" with factory for later analysis
+    // Unknown factory
     const unknownName = `Unknown (${factoryAddr.slice(0, 10)}...)`;
+    console.log(`   ⚠ Unknown factory: ${factoryAddr}`);
     poolCache.set(addr, unknownName);
-    insertPoolDexStmt.run(addr, factoryAddr, unknownName);
+    if (insertPoolDexStmt) {
+      try {
+        insertPoolDexStmt.run(addr, factoryAddr, unknownName);
+      } catch (e) {
+        // Ignore
+      }
+    }
     return unknownName;
   }
   
-  // No factory function - might be Curve or other non-standard pool
-  // Fall back to signature-based detection for these edge cases
+  // No factory function
+  console.log(`   ✗ No factory() function`);
   if (topic0) {
     const fallbackName = getFallbackDexName(topic0);
     if (fallbackName !== 'Unknown DEX') {
       poolCache.set(addr, fallbackName);
-      insertPoolDexStmt.run(addr, '', fallbackName);
+      if (insertPoolDexStmt) {
+        try {
+          insertPoolDexStmt.run(addr, '', fallbackName);
+        } catch (e) {
+          // Ignore
+        }
+      }
       return fallbackName;
     }
   }
@@ -198,78 +213,75 @@ export async function getDexForPool(poolAddress: string, topic0?: string): Promi
 }
 
 /**
- * Synchronous version for use in hot paths where we can't await.
- * Only returns cached results, returns null if not cached.
+ * Synchronous version - only returns cached results
  */
 export function getDexForPoolSync(poolAddress: string): string | null {
   const addr = poolAddress.toLowerCase();
   
-  // Singleton contracts
   if (addr === UNISWAP_V4_POOL_MANAGER) {
     return 'Uniswap V4';
   }
   
-  // Known Curve pools
   if (CURVE_POOLS.has(addr)) {
     return 'Curve';
   }
   
-  // In-memory cache
   loadCache();
   const cached = poolCache.get(addr);
   if (cached) {
     return cached;
   }
   
-  // SQLite cache
   initStatements();
-  try {
-    const row = getPoolDexStmt.get(addr) as { dexName: string } | undefined;
-    if (row) {
-      poolCache.set(addr, row.dexName);
-      return row.dexName;
+  if (getPoolDexStmt) {
+    try {
+      const row = getPoolDexStmt.get(addr) as { dexName: string } | undefined;
+      if (row) {
+        poolCache.set(addr, row.dexName);
+        return row.dexName;
+      }
+    } catch (e) {
+      // Ignore
     }
-  } catch {
-    // Table might not exist
   }
   
   return null;
 }
 
-/**
- * Queue a pool for async factory lookup.
- * Call this when getDexForPoolSync returns null.
- */
-const pendingLookups = new Map<string, Promise<string>>();
+// ============================================================================
+// ASYNC QUEUE
+// ============================================================================
 
-export function queuePoolLookup(poolAddress: string, topic0?: string): Promise<string> {
+const pendingLookups = new Map<string, { promise: Promise<string>; topic0?: string }>();
+
+export function queuePoolLookup(poolAddress: string, topic0?: string): void {
   const addr = poolAddress.toLowerCase();
   
-  // Already queued?
-  const pending = pendingLookups.get(addr);
-  if (pending) return pending;
+  if (pendingLookups.has(addr)) return;
+  if (poolCache.has(addr)) return;
   
-  // Create lookup promise
-  const promise = getDexForPool(addr, topic0).finally(() => {
+  const promise = getDexForPool(addr, topic0).catch(e => {
+    console.error(`Failed to lookup pool ${addr}:`, e);
+    return 'Unknown DEX';
+  }).finally(() => {
     pendingLookups.delete(addr);
   });
   
-  pendingLookups.set(addr, promise);
-  return promise;
+  pendingLookups.set(addr, { promise, topic0 });
 }
 
-/**
- * Process all pending lookups (call at end of block processing)
- */
 export async function flushPendingLookups(): Promise<void> {
-  if (pendingLookups.size === 0) return;
+  const count = pendingLookups.size;
+  if (count === 0) return;
   
-  const lookups = [...pendingLookups.values()];
+  console.log(`🔄 Flushing ${count} pending pool lookups...`);
+  const lookups = [...pendingLookups.values()].map(v => v.promise);
   await Promise.allSettled(lookups);
+  console.log(`✓ Pool lookups complete. Cache size: ${poolCache.size}`);
 }
 
 // ============================================================================
-// FALLBACK SIGNATURE-BASED DETECTION
+// FALLBACK
 // ============================================================================
 
 import { SIGNATURES } from './classifier.js';
@@ -282,26 +294,19 @@ const RAW_SIGNATURES = {
 function getFallbackDexName(topic0: string): string {
   const sig = topic0.toLowerCase();
   
-  // Curve TokenExchange
   if (sig === RAW_SIGNATURES.TOKEN_EXCHANGE.toLowerCase()) {
     return 'Curve';
   }
   
-  // Aerodrome Slipstream (CL) - but this should be caught by factory lookup
   if (sig === RAW_SIGNATURES.SWAP_CL.toLowerCase()) {
     return 'Aerodrome CL';
   }
-  
-  // These signatures are shared between DEXes, so we shouldn't use them as fallback
-  // V3 signature: Uniswap V3, PancakeSwap V3, Aerodrome CL all use same sig
-  // V2 signature: Uniswap V2, many forks
-  // Aero signature: Aerodrome, Velodrome, Hydrex (ve3,3 forks)
   
   return 'Unknown DEX';
 }
 
 // ============================================================================
-// UTILITY: Add new factory mappings at runtime
+// UTILITIES
 // ============================================================================
 
 export function registerFactory(factoryAddress: string, dexName: string): void {
@@ -312,14 +317,11 @@ export function registerCurvePool(poolAddress: string): void {
   CURVE_POOLS.add(poolAddress.toLowerCase());
 }
 
-// ============================================================================
-// DEBUG: Get cache stats
-// ============================================================================
-
-export function getCacheStats(): { inMemory: number; factories: number } {
+export function getCacheStats(): { inMemory: number; factories: number; pending: number } {
   loadCache();
   return {
     inMemory: poolCache.size,
     factories: Object.keys(FACTORY_TO_DEX).length,
+    pending: pendingLookups.size,
   };
 }
