@@ -397,7 +397,7 @@ function printDailyStats(targetDate?: string) {
   console.log(`💱 ${formatNumber(dexSwapCount.count)} DEX swaps`);
   console.log(`🏗️ ${formatNumber(contractDeployCount.count)} new contracts`);
   console.log('');
-  console.log('Top DEXs:');
+  console.log('Top DEX Swaps:');
   for (const dex of dexBreakdown.slice(0, 3)) {
     const pct = formatPct(dex.count, dexSwapCount.count);
     console.log(`• ${dex.dexName}: ${formatNumber(dex.count)} (${pct})`);

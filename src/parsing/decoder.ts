@@ -1,31 +1,101 @@
-import { decodeAbiParameters, type Hex } from 'viem';
-import { SIGNATURES } from './classifier.js';
-import { getDexForPoolSync, queuePoolLookup } from './pool-registry.js';
+/**
+ * Decoder functions for blockchain events
+ * Re-exports getDexName from pool-registry for convenience
+ */
 
-export interface DecodedTransfer {
-  from: string;
-  to: string;
-  amount: bigint;
+// Re-export getDexName from pool-registry
+export { getDexName } from './pool-registry.js';
+
+/**
+ * Decode ERC20 Transfer event
+ * Transfer(address indexed from, address indexed to, uint256 value)
+ */
+export function decodeErc20Transfer(
+  topics: (string | null)[],
+  data: string
+): { from: string; to: string; amount: bigint } | null {
+  if (topics.length < 3 || !topics[1] || !topics[2]) return null;
+  
+  const from = '0x' + topics[1].slice(26);
+  const to = '0x' + topics[2].slice(26);
+  const amount = BigInt(data || '0x0');
+  
+  return { from, to, amount };
 }
 
-export interface DecodedNftTransfer {
-  from: string;
-  to: string;
-  tokenId: bigint;
-  amount: bigint;
-  standard: 'ERC721' | 'ERC1155';
+/**
+ * Decode ERC721 Transfer event
+ * Transfer(address indexed from, address indexed to, uint256 indexed tokenId)
+ */
+export function decodeErc721Transfer(
+  topics: (string | null)[]
+): { from: string; to: string; tokenId: bigint } | null {
+  if (topics.length < 4 || !topics[1] || !topics[2] || !topics[3]) return null;
+  
+  const from = '0x' + topics[1].slice(26);
+  const to = '0x' + topics[2].slice(26);
+  const tokenId = BigInt(topics[3]);
+  
+  return { from, to, tokenId };
 }
 
-export interface DecodedSwapV2 {
+/**
+ * Decode ERC1155 TransferSingle event
+ * TransferSingle(address indexed operator, address indexed from, address indexed to, uint256 id, uint256 value)
+ */
+export function decodeErc1155TransferSingle(
+  topics: (string | null)[],
+  data: string
+): { operator: string; from: string; to: string; tokenId: bigint; amount: bigint } | null {
+  if (topics.length < 4 || !topics[1] || !topics[2] || !topics[3]) return null;
+  if (data.length < 130) return null; // 0x + 64 + 64
+  
+  const operator = '0x' + topics[1].slice(26);
+  const from = '0x' + topics[2].slice(26);
+  const to = '0x' + topics[3].slice(26);
+  const tokenId = BigInt('0x' + data.slice(2, 66));
+  const amount = BigInt('0x' + data.slice(66, 130));
+  
+  return { operator, from, to, tokenId, amount };
+}
+
+/**
+ * Decode V2-style Swap event (Uniswap V2, Aerodrome V2, SushiSwap, etc.)
+ * Swap(address indexed sender, uint256 amount0In, uint256 amount1In, uint256 amount0Out, uint256 amount1Out, address indexed to)
+ */
+export function decodeSwapV2(
+  topics: (string | null)[],
+  data: string
+): {
   sender: string;
   amount0In: bigint;
   amount1In: bigint;
   amount0Out: bigint;
   amount1Out: bigint;
   to: string;
+} | null {
+  if (topics.length < 3 || !topics[1] || !topics[2]) return null;
+  if (data.length < 258) return null; // 0x + 4 * 64
+  
+  const sender = '0x' + topics[1].slice(26);
+  const to = '0x' + topics[2].slice(26);
+  
+  const amount0In = BigInt('0x' + data.slice(2, 66));
+  const amount1In = BigInt('0x' + data.slice(66, 130));
+  const amount0Out = BigInt('0x' + data.slice(130, 194));
+  const amount1Out = BigInt('0x' + data.slice(194, 258));
+  
+  return { sender, amount0In, amount1In, amount0Out, amount1Out, to };
 }
 
-export interface DecodedSwapV3 {
+/**
+ * Decode V3-style Swap event (Uniswap V3, Aerodrome Slipstream, etc.)
+ * Swap(address indexed sender, address indexed recipient, int256 amount0, int256 amount1, uint160 sqrtPriceX96, uint128 liquidity, int24 tick)
+ */
+export function decodeSwapV3(
+  topics: (string | null)[],
+  data: string
+): {
   sender: string;
   recipient: string;
   amount0: bigint;
@@ -33,181 +103,28 @@ export interface DecodedSwapV3 {
   sqrtPriceX96: bigint;
   liquidity: bigint;
   tick: number;
-}
-
-// Decode ERC-20 Transfer
-export function decodeErc20Transfer(topics: (string | null)[], data: string): DecodedTransfer | null {
-  try {
-    if (!topics[1] || !topics[2]) return null;
-    
-    // from and to are in topics (indexed)
-    const from = '0x' + topics[1].slice(26);
-    const to = '0x' + topics[2].slice(26);
-    
-    // amount is in data
-    const [amount] = decodeAbiParameters(
-      [{ type: 'uint256' }],
-      data as Hex
-    );
-    
-    return { from, to, amount };
-  } catch {
-    return null;
-  }
-}
-
-// Decode ERC-721 Transfer
-export function decodeErc721Transfer(topics: (string | null)[]): DecodedNftTransfer | null {
-  try {
-    if (!topics[1] || !topics[2] || !topics[3]) return null;
-    
-    const from = '0x' + topics[1].slice(26);
-    const to = '0x' + topics[2].slice(26);
-    const tokenId = BigInt(topics[3]);
-    
-    return { from, to, tokenId, amount: 1n, standard: 'ERC721' };
-  } catch {
-    return null;
-  }
-}
-
-// Decode ERC-1155 TransferSingle
-export function decodeErc1155TransferSingle(topics: (string | null)[], data: string): DecodedNftTransfer | null {
-  try {
-    if (!topics[2] || !topics[3]) return null;
-    
-    const from = '0x' + topics[2].slice(26);
-    const to = '0x' + topics[3].slice(26);
-    
-    const [tokenId, amount] = decodeAbiParameters(
-      [{ type: 'uint256' }, { type: 'uint256' }],
-      data as Hex
-    );
-    
-    return { from, to, tokenId, amount, standard: 'ERC1155' };
-  } catch {
-    return null;
-  }
-}
-
-// Decode Uniswap V2 / Aerodrome V2 / Hydrex Swap
-export function decodeSwapV2(topics: (string | null)[], data: string): DecodedSwapV2 | null {
-  try {
-    if (!topics[1] || !topics[2]) return null;
-    
-    const sender = '0x' + topics[1].slice(26);
-    const to = '0x' + topics[2].slice(26);
-    
-    const [amount0In, amount1In, amount0Out, amount1Out] = decodeAbiParameters(
-      [{ type: 'uint256' }, { type: 'uint256' }, { type: 'uint256' }, { type: 'uint256' }],
-      data as Hex
-    );
-    
-    return { sender, amount0In, amount1In, amount0Out, amount1Out, to };
-  } catch {
-    return null;
-  }
-}
-
-// Decode Uniswap V3 / PancakeSwap V3 / Aerodrome CL Swap
-export function decodeSwapV3(topics: (string | null)[], data: string): DecodedSwapV3 | null {
-  try {
-    if (!topics[1] || !topics[2]) return null;
-    
-    const sender = '0x' + topics[1].slice(26);
-    const recipient = '0x' + topics[2].slice(26);
-    
-    const [amount0, amount1, sqrtPriceX96, liquidity, tick] = decodeAbiParameters(
-      [{ type: 'int256' }, { type: 'int256' }, { type: 'uint160' }, { type: 'uint128' }, { type: 'int24' }],
-      data as Hex
-    );
-    
-    return { 
-      sender, 
-      recipient, 
-      amount0: amount0 as bigint, 
-      amount1: amount1 as bigint, 
-      sqrtPriceX96: sqrtPriceX96 as bigint, 
-      liquidity: liquidity as bigint, 
-      tick: Number(tick) 
-    };
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Get DEX name for a swap event.
- * 
- * Uses pool registry for accurate identification:
- * - Checks cache first (sync, fast)
- * - Queues async factory lookup if not cached
- * - Falls back to signature-based detection only for edge cases
- * 
- * @param poolAddress - The pool contract that emitted the swap
- * @param topic0 - The event signature
- * @returns DEX name
- */
-export function getDexName(poolAddress: string, topic0: string): string {
-  // Try sync cache lookup first (covers 99%+ of cases after warmup)
-  const cached = getDexForPoolSync(poolAddress);
-  if (cached) {
-    return cached;
-  }
+} | null {
+  if (topics.length < 3 || !topics[1] || !topics[2]) return null;
+  if (data.length < 322) return null; // 0x + 5 * 64
   
-  // Queue async lookup for next time
-  queuePoolLookup(poolAddress, topic0);
+  const sender = '0x' + topics[1].slice(26);
+  const recipient = '0x' + topics[2].slice(26);
   
-  // For now, use signature-based fallback
-  // This will only happen on first encounter of a new pool
-  return getSignatureBasedDexName(topic0);
-}
-
-/**
- * Legacy signature-based DEX detection.
- * 
- * IMPORTANT: This is inaccurate for many DEXes that share signatures!
- * - V3 signature is shared by: Uniswap V3, PancakeSwap V3, SushiSwap V3
- * - V2 signature is shared by: Uniswap V2, many forks
- * - Aero signature is shared by: Aerodrome, Velodrome, Hydrex
- * 
- * Only used as fallback when pool isn't in cache yet.
- */
-function getSignatureBasedDexName(topic0: string): string {
-  const sig = topic0.toLowerCase();
+  // int256 values - need to handle negative numbers
+  const amount0Raw = BigInt('0x' + data.slice(2, 66));
+  const amount1Raw = BigInt('0x' + data.slice(66, 130));
   
-  // Curve has unique signature
-  if (sig === '0x98de503528ee59b575ef0c0a2576a82497bfc029a5685b209e9ec333479b10a5') {
-    return 'Curve';
-  }
+  // Convert from uint256 to int256
+  const MAX_INT256 = BigInt('0x7fffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff');
+  const amount0 = amount0Raw > MAX_INT256 ? amount0Raw - BigInt('0x10000000000000000000000000000000000000000000000000000000000000000') : amount0Raw;
+  const amount1 = amount1Raw > MAX_INT256 ? amount1Raw - BigInt('0x10000000000000000000000000000000000000000000000000000000000000000') : amount1Raw;
   
-  // V3-style (could be Uniswap V3, PancakeSwap V3, etc)
-  if (sig === SIGNATURES.SWAP_V3.toLowerCase()) {
-    return 'DEX V3'; // Generic until factory lookup completes
-  }
+  const sqrtPriceX96 = BigInt('0x' + data.slice(130, 194));
+  const liquidity = BigInt('0x' + data.slice(194, 258));
   
-  // V2-style (could be Uniswap V2, BaseSwap, etc)
-  if (sig === SIGNATURES.SWAP_V2.toLowerCase()) {
-    return 'DEX V2'; // Generic until factory lookup completes
-  }
+  // int24 tick
+  const tickRaw = BigInt('0x' + data.slice(258, 322));
+  const tick = Number(tickRaw > BigInt(0x7fffff) ? tickRaw - BigInt(0x1000000) : tickRaw);
   
-  // Aerodrome-style (could be Aerodrome, Hydrex, Velodrome fork)
-  if (sig === SIGNATURES.SWAP_AERO.toLowerCase()) {
-    return 'DEX ve(3,3)'; // Generic until factory lookup completes
-  }
-  
-  // Aerodrome CL / Slipstream
-  if (sig === '0x70935338e69775456a85ddef226c395fb668b63fa0115f5f20610b388e6ca9c0') {
-    return 'DEX CL'; // Generic until factory lookup completes
-  }
-  
-  return 'Unknown DEX';
-}
-
-/**
- * Check if the pool registry has been warmed up for this pool.
- * Useful for knowing if getDexName result is accurate or a fallback.
- */
-export function isPoolCached(poolAddress: string): boolean {
-  return getDexForPoolSync(poolAddress) !== null;
+  return { sender, recipient, amount0, amount1, sqrtPriceX96, liquidity, tick };
 }
