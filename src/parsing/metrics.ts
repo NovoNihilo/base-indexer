@@ -5,9 +5,8 @@ import {
   decodeErc1155TransferSingle,
   decodeSwapV2,
   decodeSwapV3,
-  getDexName,
 } from './decoder.js';
-import { stmts } from '../storage/db.js';
+import { getDexName } from './pool-registry.js';
 
 interface TxData {
   hash: string;
@@ -174,12 +173,15 @@ export function computeBlockMetrics(
           });
         }
       } else if (eventType === 'dex_swap_v2' || eventType === 'dex_swap_aero') {
+        // V2-style swaps (Uniswap V2, Aerodrome V2, SushiSwap, etc.)
         const decoded = decodeSwapV2(log.topics, log.data);
         if (decoded) {
+          const dexName = getDexName(log.topics[0]!);
+          
           dexSwaps.push({
             txHash: log.txHash,
             logIndex: log.logIndex,
-            dexName: getDexName(log.topics[0]!),
+            dexName,
             poolAddress: log.address,
             sender: decoded.sender,
             recipient: decoded.to,
@@ -190,18 +192,20 @@ export function computeBlockMetrics(
           });
         }
       } else if (eventType === 'dex_swap_v3') {
+        // V3-style swaps (Uniswap V3, Aerodrome Slipstream, PancakeSwap V3, etc.)
         const decoded = decodeSwapV3(log.topics, log.data);
         if (decoded) {
-          // V3 swaps: positive amount = in, negative = out
           const amount0In = decoded.amount0 > 0n ? decoded.amount0.toString() : '0';
           const amount1In = decoded.amount1 > 0n ? decoded.amount1.toString() : '0';
           const amount0Out = decoded.amount0 < 0n ? (-decoded.amount0).toString() : '0';
           const amount1Out = decoded.amount1 < 0n ? (-decoded.amount1).toString() : '0';
           
+          const dexName = getDexName(log.topics[0]!);
+          
           dexSwaps.push({
             txHash: log.txHash,
             logIndex: log.logIndex,
-            dexName: 'Uniswap V3',
+            dexName,
             poolAddress: log.address,
             sender: decoded.sender,
             recipient: decoded.recipient,

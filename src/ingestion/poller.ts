@@ -14,6 +14,21 @@ import {
 import { computeBlockMetrics } from '../parsing/metrics.js';
 
 let useBatchReceipts = true;
+let isShuttingDown = false;
+let blocksProcessedSinceStart = 0;
+let startTime = Date.now();
+
+// Health stats (exported for monitoring)
+export const healthStats = {
+  lastBlockProcessed: 0n,
+  lastBlockTimestamp: 0,
+  blocksProcessed: 0,
+  errors: 0,
+  isRunning: false,
+  startedAt: 0,
+  catchingUp: false,
+  blocksBehind: 0,
+};
 
 async function handleReorg(currentBlock: bigint): Promise<bigint> {
   const prevRow = stmts.getBlockByNumber.get(Number(currentBlock - 1n)) as
@@ -24,7 +39,7 @@ async function handleReorg(currentBlock: bigint): Promise<bigint> {
 
   const block = await fetchBlockWithTxs(currentBlock);
   if (block.parentHash.toLowerCase() !== prevRow.hash.toLowerCase()) {
-    console.log(`⚠️  Reorg detected at block ${currentBlock}`);
+    console.log(`\n⚠️  Reorg detected at block ${currentBlock}`);
     const rewindTo = currentBlock - BigInt(cfg.REORG_REWIND_DEPTH);
     stmts.markReorged.run(Number(rewindTo));
     
@@ -54,7 +69,7 @@ function parseHexBigInt(val: any): bigint {
   return 0n;
 }
 
-async function processBlock(blockNumber: bigint) {
+async function processBlock(blockNumber: bigint): Promise<{ txCount: number; logCount: number; swapCount: number }> {
   const block = await fetchBlockWithTxs(blockNumber);
   
   const txs = block.transactions.filter(
@@ -66,7 +81,7 @@ async function processBlock(blockNumber: bigint) {
   if (useBatchReceipts) {
     receipts = await fetchBlockReceipts(blockNumber);
     if (receipts === null) {
-      console.log('⚠️  Batch receipts not supported, using individual fetches');
+      console.log('\n⚠️  Batch receipts not supported, using individual fetches');
       useBatchReceipts = false;
     }
   }
@@ -255,19 +270,59 @@ async function processBlock(blockNumber: bigint) {
 
   setLastProcessedBlock(blockNumber);
   
-  const swapCount = enriched.dexSwaps.length;
-  const transferCount = enriched.tokenTransfers.length;
-  console.log(
-    `✓ Block ${block.number} | txs: ${metrics.txCount} | logs: ${metrics.logCount} | swaps: ${swapCount} | transfers: ${transferCount}`
-  );
+  // Update health stats
+  healthStats.lastBlockProcessed = blockNumber;
+  healthStats.lastBlockTimestamp = Date.now();
+  healthStats.blocksProcessed++;
+  blocksProcessedSinceStart++;
+  
+  return {
+    txCount: metrics.txCount,
+    logCount: metrics.logCount,
+    swapCount: enriched.dexSwaps.length,
+  };
 }
 
 function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// Graceful shutdown handler
+function setupShutdownHandlers() {
+  const shutdown = async (signal: string) => {
+    if (isShuttingDown) return;
+    isShuttingDown = true;
+    
+    console.log(`\n\n🛑 Received ${signal}. Shutting down gracefully...`);
+    console.log(`📊 Processed ${blocksProcessedSinceStart} blocks this session`);
+    console.log(`⏱️  Runtime: ${((Date.now() - startTime) / 1000 / 60).toFixed(1)} minutes`);
+    
+    healthStats.isRunning = false;
+    
+    // Give current block time to finish
+    await sleep(500);
+    
+    console.log('✅ Shutdown complete\n');
+    process.exit(0);
+  };
+
+  process.on('SIGINT', () => shutdown('SIGINT'));
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+}
+
 export async function startPoller() {
+  setupShutdownHandlers();
+  
   let lastProcessed: bigint | null = getLastProcessedBlock();
+  startTime = Date.now();
+  healthStats.startedAt = startTime;
+  healthStats.isRunning = true;
+
+  console.log('╔════════════════════════════════════════════════════════════╗');
+  console.log('║           🔗 Base Indexer - Starting Up                    ║');
+  console.log('╠════════════════════════════════════════════════════════════╣');
+  console.log('║  Press Ctrl+C for graceful shutdown                        ║');
+  console.log('╚════════════════════════════════════════════════════════════╝\n');
 
   if (lastProcessed === null) {
     const latest = await getLatestBlockNumber();
@@ -277,27 +332,91 @@ export async function startPoller() {
     console.log(`🔄 Resuming from block ${lastProcessed + 1n}`);
   }
 
-  while (true) {
+  // Check how far behind we are
+  const latestOnStart = await getLatestBlockNumber();
+  const blocksBehind = Number(latestOnStart - lastProcessed);
+  if (blocksBehind > 10) {
+    console.log(`⚡ Catch-up mode: ${blocksBehind} blocks behind\n`);
+    healthStats.catchingUp = true;
+  } else {
+    console.log('');
+  }
+
+  while (!isShuttingDown) {
     try {
       const latestHead = await getLatestBlockNumber();
+      const safeHead = latestHead - BigInt(cfg.SAFETY_BUFFER_BLOCKS);
       const nextBlock: bigint = lastProcessed + 1n;
+      
+      const currentBehind = Number(safeHead - lastProcessed);
+      healthStats.blocksBehind = currentBehind;
 
-      if (nextBlock > latestHead) {
+      // If we're caught up, wait for new blocks
+      if (nextBlock > safeHead) {
+        healthStats.catchingUp = false;
         await sleep(cfg.POLL_INTERVAL_MS);
         continue;
       }
 
+      // Check for reorg
       const processFrom = await handleReorg(nextBlock);
       if (processFrom < nextBlock) {
         lastProcessed = processFrom - 1n;
         continue;
       }
 
-      await processBlock(nextBlock);
+      // CATCH-UP MODE: Process without sleeping when behind
+      healthStats.catchingUp = currentBehind > 5;
+      
+      const result = await processBlock(nextBlock);
       lastProcessed = nextBlock;
+      
+      // Log progress
+      if (currentBehind > 10) {
+        // Heavy catch-up: update same line
+        const blocksPerSec = blocksProcessedSinceStart / ((Date.now() - startTime) / 1000);
+        const eta = currentBehind / blocksPerSec;
+        process.stdout.write(
+          `\r⚡ Block ${nextBlock} | ${currentBehind} behind | ${blocksPerSec.toFixed(1)} blk/s | ETA: ${eta.toFixed(0)}s   `
+        );
+      } else {
+        // Near caught up or caught up: normal logging (new line each block)
+        if (healthStats.catchingUp) {
+          // Print newline to clear the catch-up line
+          console.log('');
+          healthStats.catchingUp = false;
+        }
+        console.log(
+          `✓ Block ${nextBlock} | tx: ${result.txCount} | logs: ${result.logCount} | swaps: ${result.swapCount}`
+        );
+      }
+
+      // Only sleep if we're caught up (within 5 blocks)
+      if (currentBehind <= 5) {
+        await sleep(cfg.POLL_INTERVAL_MS);
+      }
+      
     } catch (err) {
-      console.error('❌ Error:', (err as Error).message);
+      healthStats.errors++;
+      console.error('\n❌ Error:', (err as Error).message);
       await sleep(cfg.POLL_INTERVAL_MS * 2);
     }
   }
+}
+
+// Health check function
+export function getHealthStatus() {
+  const uptime = Date.now() - healthStats.startedAt;
+  const blocksPerSecond = uptime > 0 ? healthStats.blocksProcessed / (uptime / 1000) : 0;
+  
+  return {
+    status: healthStats.isRunning ? 'running' : 'stopped',
+    lastBlock: healthStats.lastBlockProcessed.toString(),
+    blocksProcessed: healthStats.blocksProcessed,
+    blocksBehind: healthStats.blocksBehind,
+    catchingUp: healthStats.catchingUp,
+    errors: healthStats.errors,
+    uptimeSeconds: Math.floor(uptime / 1000),
+    blocksPerSecond: blocksPerSecond.toFixed(2),
+  };
 }
